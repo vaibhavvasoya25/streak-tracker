@@ -448,7 +448,7 @@ export default function Home() {
       {/* Header */}
       <div style={{ width: "100%", backgroundColor: "#1c1917", padding: "28px 24px 24px", textAlign: "center", marginBottom: "28px" }}>
         <p style={{ color: "#a8a29e", fontSize: "11px", letterSpacing: "3px", textTransform: "uppercase", margin: "0 0 8px 0" }}>your streak tracker</p>
-        <h1 style={{ color: "#fafaf9", fontSize: "clamp(22px, 6vw, 30px)", fontWeight: "normal", letterSpacing: "0.5px", margin: 0 }}>Stay the Course</h1>
+        <h1 style={{ color: "#fafaf9", fontSize: "clamp(22px, 6vw, 30px)", fontWeight: "normal", letterSpacing: "0.5px", margin: 0 }}>Stay updated, Not outdated</h1>
         <p style={{ color: "#78716c", fontSize: "13px", marginTop: "10px", fontStyle: "italic" }}>{formatDate(todayD)}</p>
         {/* Save status indicator */}
         <p style={{ color: saving ? "#a8a29e" : saveError ? "#ef4444" : "transparent", fontSize: "10px", marginTop: "6px", letterSpacing: "1px" }}>
