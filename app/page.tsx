@@ -1,347 +1,310 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function getDaysDiff(startDate: Date, endDate: Date): number {
-  const msPerDay = 1000 * 60 * 60 * 24;
-  const start = Date.UTC(startDate.getFullYear(), startDate.getMonth(), startDate.getDate());
-  const end = Date.UTC(endDate.getFullYear(), endDate.getMonth(), endDate.getDate());
-  return Math.max(0, Math.floor((end - start) / msPerDay));
+function getDaysDiff(a: Date, b: Date): number {
+  const utc = (d: Date) => Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
+  return Math.max(0, Math.floor((utc(b) - utc(a)) / 86400000));
 }
 
-function formatDate(date: Date): string {
-  return `${date.getDate()}-${date.getMonth() + 1}-${date.getFullYear()}`;
+function formatDate(d: Date): string {
+  return `${d.getDate()}-${d.getMonth() + 1}-${d.getFullYear()}`;
 }
 
-function toInputValue(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
+function toInputVal(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-function todayInputValue(): string {
-  return toInputValue(new Date());
+function todayStr(): string { return toInputVal(new Date()); }
+
+function addDays(d: Date, n: number): Date {
+  const r = new Date(d); r.setDate(r.getDate() + n); return r;
 }
 
-function daysToMonthsDays(days: number): { months: number; remaining: number } {
-  return { months: Math.floor(days / 30), remaining: days % 30 };
+function parseLocalDate(s: string): Date {
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function monthsDays(days: number) {
+  return { months: Math.floor(days / 30), rem: days % 30 };
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 interface HabitState {
-  startDate: Date;
-  daysCount: number;   // days marked "done"
-  skipCount: number;   // days marked "skip"
-  lastActionDate: string | null; // "YYYY-MM-DD" — the last day an action was recorded
+  startDate: string;        // "YYYY-MM-DD"
+  daysCount: number;
+  skipCount: number;
+  lastActionDate: string | null;
   lastAction: "done" | "skip" | null;
+  loggedDates: string[];    // every "YYYY-MM-DD" that has been actioned
 }
 
-// ─── ProgressBar ─────────────────────────────────────────────────────────────
+interface AppState {
+  crn: { startDate: string };
+  exrcs: HabitState;
+  wlk: HabitState;
+}
+
+// ─── Default state (your real current numbers) ────────────────────────────────
+
+const DEFAULT_STATE: AppState = {
+  crn: { startDate: "2026-06-07" },
+  exrcs: {
+    startDate: "2026-04-21",
+    daysCount: 48,
+    skipCount: 6,
+    lastActionDate: "2026-06-13",
+    lastAction: "done" as const,
+    loggedDates: ["2026-06-13"],
+  },
+  wlk: {
+    startDate: "2026-04-22",
+    daysCount: 44,
+    skipCount: 8,
+    lastActionDate: "2026-06-13",
+    lastAction: "done" as const,
+    loggedDates: ["2026-06-13"],
+  },
+};
+
+// ─── Compute missing days between last logged date and yesterday ──────────────
+
+function getMissingDays(state: HabitState, todayKey: string): string[] {
+  if (!state.lastActionDate) return [];
+  const last    = parseLocalDate(state.lastActionDate);
+  const todayD  = parseLocalDate(todayKey);
+  const missing: string[] = [];
+  let cursor = addDays(last, 1);
+  while (cursor < todayD) {
+    const k = toInputVal(cursor);
+    if (!state.loggedDates.includes(k)) missing.push(k);
+    cursor = addDays(cursor, 1);
+  }
+  return missing;
+}
+
+// ─── Small components ─────────────────────────────────────────────────────────
 
 function ProgressBar({ value, max, color, border }: { value: number; max: number; color: string; border: string }) {
   return (
     <div style={{ marginTop: "16px", height: "4px", backgroundColor: border, borderRadius: "99px", overflow: "hidden" }}>
-      <div
-        style={{
-          height: "100%",
-          width: `${Math.min((value / max) * 100, 100)}%`,
-          backgroundColor: color,
-          borderRadius: "99px",
-          opacity: 0.7,
-        }}
-      />
+      <div style={{ height: "100%", width: `${Math.min((value / Math.max(max, 1)) * 100, 100)}%`, backgroundColor: color, borderRadius: "99px", opacity: 0.7 }} />
     </div>
   );
 }
 
-// ─── Undo Toast ───────────────────────────────────────────────────────────────
-
 function UndoToast({ message, onUndo, color }: { message: string; onUndo: () => void; color: string }) {
-  const [progress, setProgress] = useState(100);
-
+  const [pct, setPct] = useState(100);
   useEffect(() => {
-    const interval = setInterval(() => {
-      setProgress((p) => {
-        if (p <= 0) { clearInterval(interval); return 0; }
-        return p - 1; // 100 steps × 100ms = 10 seconds
-      });
-    }, 100);
-    return () => clearInterval(interval);
+    const t = setInterval(() => setPct(p => { if (p <= 0) { clearInterval(t); return 0; } return p - 1; }), 100);
+    return () => clearInterval(t);
   }, []);
-
   return (
-    <div
-      style={{
-        marginTop: "12px",
-        backgroundColor: "white",
-        border: `1.5px solid ${color}33`,
-        borderRadius: "12px",
-        padding: "12px 14px",
-        boxShadow: "0 2px 12px rgba(0,0,0,0.08)",
-        overflow: "hidden",
-        position: "relative",
-      }}
-    >
-      {/* shrinking progress bar at bottom */}
-      <div
-        style={{
-          position: "absolute",
-          bottom: 0,
-          left: 0,
-          height: "3px",
-          width: `${progress}%`,
-          backgroundColor: color,
-          opacity: 0.4,
-          borderRadius: "0 0 0 12px",
-        }}
-      />
+    <div style={{ marginTop: "12px", backgroundColor: "white", border: `1.5px solid ${color}33`, borderRadius: "12px", padding: "12px 14px", boxShadow: "0 2px 12px rgba(0,0,0,0.08)", overflow: "hidden", position: "relative" }}>
+      <div style={{ position: "absolute", bottom: 0, left: 0, height: "3px", width: `${pct}%`, backgroundColor: color, opacity: 0.4, borderRadius: "0 0 0 12px" }} />
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px" }}>
-        <p style={{ margin: 0, fontSize: "12px", color: "#78716c", fontStyle: "italic" }}>
-          {message}
-        </p>
-        <button
-          onClick={onUndo}
-          style={{
-            backgroundColor: color,
-            color: "white",
-            border: "none",
-            borderRadius: "8px",
-            padding: "6px 14px",
-            fontSize: "12px",
-            cursor: "pointer",
-            fontFamily: "'Georgia', serif",
-            whiteSpace: "nowrap",
-            flexShrink: 0,
-          }}
-        >
-          Undo
-        </button>
+        <p style={{ margin: 0, fontSize: "12px", color: "#78716c", fontStyle: "italic" }}>{message}</p>
+        <button onClick={onUndo} style={{ backgroundColor: color, color: "white", border: "none", borderRadius: "8px", padding: "6px 14px", fontSize: "12px", cursor: "pointer", fontFamily: "'Georgia', serif", whiteSpace: "nowrap", flexShrink: 0 }}>Undo</button>
       </div>
     </div>
+  );
+}
+
+// Inline editable number — tap to edit, blur/enter to save
+function EditableCount({
+  value, color, border, bg, onSave,
+}: { value: number; color: string; border: string; bg: string; onSave: (v: number) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [raw, setRaw]         = useState(String(value));
+  const ref = useRef<HTMLInputElement>(null);
+
+  const commit = () => {
+    const n = parseInt(raw, 10);
+    if (!isNaN(n) && n >= 0) onSave(n);
+    setEditing(false);
+  };
+
+  useEffect(() => { if (editing) ref.current?.focus(); }, [editing]);
+  useEffect(() => { if (!editing) setRaw(String(value)); }, [value, editing]);
+
+  if (editing) {
+    return (
+      <input
+        ref={ref}
+        type="number"
+        value={raw}
+        onChange={e => setRaw(e.target.value)}
+        onBlur={commit}
+        onKeyDown={e => { if (e.key === "Enter") commit(); if (e.key === "Escape") setEditing(false); }}
+        style={{
+          width: "80px", fontSize: "clamp(40px, 12vw, 56px)", fontWeight: "bold", color,
+          lineHeight: 1, letterSpacing: "-1px", border: `2px solid ${border}`,
+          borderRadius: "8px", backgroundColor: bg, outline: "none", padding: "0 4px",
+          fontFamily: "'Georgia', serif", textAlign: "center",
+        }}
+      />
+    );
+  }
+  return (
+    <span
+      onClick={() => setEditing(true)}
+      title="Tap to edit"
+      style={{
+        fontSize: "clamp(40px, 12vw, 56px)", fontWeight: "bold", color, lineHeight: 1,
+        letterSpacing: "-1px", cursor: "pointer", borderBottom: `2px dotted ${color}55`,
+      }}
+    >
+      {value}
+    </span>
   );
 }
 
 // ─── Qt Fixed Card (ntcn & mv) ───────────────────────────────────────────────
 
-function QtFixedCard({
-  label, startDate, days, color, bg, border,
-}: {
-  label: string; startDate: Date; days: number;
-  color: string; bg: string; border: string;
+function QtFixedCard({ label, startDate, days, color, bg, border }: {
+  label: string; startDate: Date; days: number; color: string; bg: string; border: string;
 }) {
-  const { months, remaining } = daysToMonthsDays(days);
-
+  const { months, rem } = monthsDays(days);
   return (
     <div style={{ backgroundColor: bg, border: `1.5px solid ${border}`, borderRadius: "16px", padding: "24px 22px", boxShadow: "0 2px 8px rgba(0,0,0,0.04)" }}>
-      <p style={{ fontSize: "11px", letterSpacing: "2.5px", textTransform: "uppercase", color, margin: "0 0 6px 0", fontWeight: "bold" }}>
-        {label}
-      </p>
-      <p style={{ fontSize: "13px", color: "#78716c", margin: "0 0 16px 0", fontStyle: "italic" }}>
-        since {formatDate(startDate)}
-      </p>
-
+      <p style={{ fontSize: "11px", letterSpacing: "2.5px", textTransform: "uppercase", color, margin: "0 0 6px 0", fontWeight: "bold" }}>{label}</p>
+      <p style={{ fontSize: "13px", color: "#78716c", margin: "0 0 16px 0", fontStyle: "italic" }}>since {formatDate(startDate)}</p>
       <div style={{ display: "flex", alignItems: "flex-end", gap: "10px", flexWrap: "wrap" }}>
         <div style={{ display: "flex", alignItems: "flex-end", gap: "6px" }}>
-          <span style={{ fontSize: "clamp(52px, 16vw, 72px)", fontWeight: "bold", color, lineHeight: 1, letterSpacing: "-2px" }}>
-            {days}
-          </span>
+          <span style={{ fontSize: "clamp(52px, 16vw, 72px)", fontWeight: "bold", color, lineHeight: 1, letterSpacing: "-2px" }}>{days}</span>
           <span style={{ fontSize: "16px", color: "#a8a29e", paddingBottom: "10px", fontStyle: "italic" }}>days</span>
         </div>
         {months > 0 && (
           <div style={{ paddingBottom: "10px" }}>
-            <span
-              style={{
-                backgroundColor: color + "18",
-                border: `1px solid ${color}33`,
-                borderRadius: "20px",
-                padding: "3px 10px",
-                fontSize: "12px",
-                color: color,
-                fontStyle: "italic",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {months}mo {remaining}d
+            <span style={{ backgroundColor: color + "18", border: `1px solid ${color}33`, borderRadius: "20px", padding: "3px 10px", fontSize: "12px", color, fontStyle: "italic", whiteSpace: "nowrap" }}>
+              {months}mo {rem}d
             </span>
           </div>
         )}
       </div>
-
-      {/* Progress bar — open-ended, 365 days as soft target */}
       <ProgressBar value={days} max={365} color={color} border={border} />
     </div>
   );
 }
 
-// ─── Habit Card (exrcs & wlk) ────────────────────────────────────────────────
+// ─── Missed Day Prompt ────────────────────────────────────────────────────────
+
+function MissedDayPrompt({ dateKey, color, bg, border, onAction }: {
+  dateKey: string; color: string; bg: string; border: string;
+  onAction: (action: "done" | "skip") => void;
+}) {
+  const d = parseLocalDate(dateKey);
+  return (
+    <div style={{ backgroundColor: bg, border: `1.5px solid ${border}`, borderRadius: "12px", padding: "14px 16px", marginTop: "12px" }}>
+      <p style={{ margin: "0 0 10px 0", fontSize: "12px", color: "#78716c", fontStyle: "italic" }}>
+        What happened on <strong style={{ color }}>{formatDate(d)}</strong>?
+      </p>
+      <div style={{ display: "flex", gap: "8px" }}>
+        <button onClick={() => onAction("done")} style={{ flex: 1, backgroundColor: color, color: "white", border: "none", borderRadius: "10px", padding: "10px", fontSize: "13px", cursor: "pointer", fontFamily: "'Georgia', serif", fontWeight: "bold" }}>✓ Done</button>
+        <button onClick={() => onAction("skip")} style={{ flex: 1, backgroundColor: "white", color: "#78716c", border: "1.5px solid #e7e5e4", borderRadius: "10px", padding: "10px", fontSize: "13px", cursor: "pointer", fontFamily: "'Georgia', serif" }}>Skip</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Habit Card ───────────────────────────────────────────────────────────────
 
 function HabitCard({
-  label, color, bg, border,
-  state, todayDone, showUndo, editMode, setEditMode,
-  onDone, onSkip, onUndo, onDateChange, undoMessage,
+  label, color, bg, border, state, todayKey,
+  showUndo, undoMessage, missedDays,
+  onTodayDone, onTodaySkip, onUndo,
+  onMissedAction, onDateChange, onCountChange,
 }: {
   label: string; color: string; bg: string; border: string;
-  state: HabitState; todayDone: boolean;
-  showUndo: boolean; editMode: boolean;
-  setEditMode: (v: boolean) => void;
-  onDone: () => void; onSkip: () => void; onUndo: () => void;
+  state: HabitState; todayKey: string;
+  showUndo: boolean; undoMessage: string;
+  missedDays: string[];
+  onTodayDone: () => void; onTodaySkip: () => void; onUndo: () => void;
+  onMissedAction: (dateKey: string, action: "done" | "skip") => void;
   onDateChange: (val: string) => void;
-  undoMessage: string;
+  onCountChange: (field: "daysCount" | "skipCount", val: number) => void;
 }) {
-  // Progress bar: done days out of (done + skip), i.e. consistency rate
-  const total = state.daysCount + state.skipCount;
-  const progressVal = total > 0 ? state.daysCount : 0;
-  const progressMax = Math.max(total, 1);
+  const [dateEdit, setDateEdit] = useState(false);
+  const todayDone = state.lastActionDate === todayKey;
+
+  // Show missed day prompts one at a time (oldest first)
+  const nextMissed = missedDays.length > 0 ? missedDays[0] : null;
 
   return (
     <div style={{ backgroundColor: bg, border: `1.5px solid ${border}`, borderRadius: "16px", padding: "24px 22px", boxShadow: "0 2px 8px rgba(0,0,0,0.04)" }}>
-      <p style={{ fontSize: "11px", letterSpacing: "2.5px", textTransform: "uppercase", color, margin: "0 0 6px 0", fontWeight: "bold" }}>
-        {label}
-      </p>
+      <p style={{ fontSize: "11px", letterSpacing: "2.5px", textTransform: "uppercase", color, margin: "0 0 6px 0", fontWeight: "bold" }}>{label}</p>
 
-      {/* Editable since date */}
-      {editMode ? (
+      {/* Editable start date */}
+      {dateEdit ? (
         <div style={{ marginBottom: "16px" }}>
           <input
-            type="date"
-            defaultValue={toInputValue(state.startDate)}
-            max={todayInputValue()}
-            autoFocus
-            onChange={(e) => { if (e.target.value) onDateChange(e.target.value); }}
-            onBlur={() => setEditMode(false)}
-            style={{
-              fontSize: "13px",
-              color,
-              border: `1.5px solid ${border}`,
-              borderRadius: "8px",
-              padding: "6px 10px",
-              fontFamily: "'Georgia', serif",
-              backgroundColor: "white",
-              outline: "none",
-              width: "100%",
-              boxSizing: "border-box" as const,
-            }}
+            type="date" defaultValue={state.startDate} max={todayStr()} autoFocus
+            onChange={e => { if (e.target.value) onDateChange(e.target.value); }}
+            onBlur={() => setDateEdit(false)}
+            style={{ fontSize: "13px", color, border: `1.5px solid ${border}`, borderRadius: "8px", padding: "6px 10px", fontFamily: "'Georgia', serif", backgroundColor: "white", outline: "none", width: "100%", boxSizing: "border-box" as const }}
           />
         </div>
       ) : (
-        <p
-          onClick={() => setEditMode(true)}
-          style={{
-            fontSize: "13px",
-            color: "#78716c",
-            margin: "0 0 16px 0",
-            fontStyle: "italic",
-            cursor: "pointer",
-            display: "inline-block",
-            textDecoration: "underline dotted",
-          }}
-        >
-          since {formatDate(state.startDate)} ✎
+        <p onClick={() => setDateEdit(true)} style={{ fontSize: "13px", color: "#78716c", margin: "0 0 16px 0", fontStyle: "italic", cursor: "pointer", display: "inline-block", textDecoration: "underline dotted" }}>
+          since {formatDate(parseLocalDate(state.startDate))} ✎
         </p>
       )}
 
-      {/* Stats + overlay */}
+      {/* Stats row — editable done/skip counts */}
       <div style={{ position: "relative" }}>
-        {/* Numbers — blurred when today's action is still pending */}
-        <div
-          style={{
-            display: "flex",
-            gap: "24px",
-            filter: todayDone ? "none" : "blur(3px)",
-            transition: "filter 0.3s",
-            userSelect: "none" as const,
-            pointerEvents: todayDone ? "auto" : "none" as const,
-          }}
-        >
+        <div style={{
+          display: "flex", gap: "24px",
+          filter: (todayDone || nextMissed) ? "none" : "blur(3px)",
+          transition: "filter 0.3s",
+          userSelect: "none" as const,
+          pointerEvents: (todayDone || nextMissed) ? "auto" : "none" as const,
+        }}>
           <div>
-            <p style={{ fontSize: "11px", color: "#a8a29e", margin: "0 0 2px 0", letterSpacing: "1px", textTransform: "uppercase" as const }}>
-              Done
-            </p>
+            <p style={{ fontSize: "11px", color: "#a8a29e", margin: "0 0 2px 0", letterSpacing: "1px", textTransform: "uppercase" as const }}>Done</p>
             <div style={{ display: "flex", alignItems: "flex-end", gap: "4px" }}>
-              <span style={{ fontSize: "clamp(40px, 12vw, 56px)", fontWeight: "bold", color, lineHeight: 1, letterSpacing: "-1px" }}>
-                {state.daysCount}
-              </span>
+              <EditableCount value={state.daysCount} color={color} border={border} bg={bg} onSave={v => onCountChange("daysCount", v)} />
               <span style={{ fontSize: "13px", color: "#a8a29e", paddingBottom: "7px", fontStyle: "italic" }}>days</span>
             </div>
           </div>
-
           <div style={{ width: "1px", backgroundColor: border, alignSelf: "stretch", margin: "4px 0" }} />
-
           <div>
-            <p style={{ fontSize: "11px", color: "#a8a29e", margin: "0 0 2px 0", letterSpacing: "1px", textTransform: "uppercase" as const }}>
-              Skipped
-            </p>
+            <p style={{ fontSize: "11px", color: "#a8a29e", margin: "0 0 2px 0", letterSpacing: "1px", textTransform: "uppercase" as const }}>Skipped</p>
             <div style={{ display: "flex", alignItems: "flex-end", gap: "4px" }}>
-              <span style={{ fontSize: "clamp(40px, 12vw, 56px)", fontWeight: "bold", color: "#a8a29e", lineHeight: 1, letterSpacing: "-1px" }}>
-                {state.skipCount}
-              </span>
+              <EditableCount value={state.skipCount} color="#a8a29e" border={border} bg={bg} onSave={v => onCountChange("skipCount", v)} />
               <span style={{ fontSize: "13px", color: "#a8a29e", paddingBottom: "7px", fontStyle: "italic" }}>days</span>
             </div>
           </div>
         </div>
 
-        {/* Done / Skip overlay — only when today not yet logged */}
-        {!todayDone && (
-          <div
-            style={{
-              position: "absolute",
-              inset: 0,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: "12px",
-            }}
-          >
-            <button
-              onClick={onDone}
-              style={{
-                backgroundColor: color,
-                color: "white",
-                border: "none",
-                borderRadius: "12px",
-                padding: "13px 24px",
-                fontSize: "15px",
-                cursor: "pointer",
-                fontFamily: "'Georgia', serif",
-                fontWeight: "bold",
-                boxShadow: `0 4px 14px ${color}44`,
-                letterSpacing: "0.3px",
-              }}
-            >
-              ✓ Done
-            </button>
-            <button
-              onClick={onSkip}
-              style={{
-                backgroundColor: "white",
-                color: "#78716c",
-                border: "1.5px solid #e7e5e4",
-                borderRadius: "12px",
-                padding: "13px 24px",
-                fontSize: "15px",
-                cursor: "pointer",
-                fontFamily: "'Georgia', serif",
-                letterSpacing: "0.3px",
-              }}
-            >
-              Skip
-            </button>
+        {/* Today's prompt — only when no missed days pending and today not logged */}
+        {!todayDone && !nextMissed && (
+          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: "12px" }}>
+            <button onClick={onTodayDone} style={{ backgroundColor: color, color: "white", border: "none", borderRadius: "12px", padding: "13px 24px", fontSize: "15px", cursor: "pointer", fontFamily: "'Georgia', serif", fontWeight: "bold", boxShadow: `0 4px 14px ${color}44`, letterSpacing: "0.3px" }}>✓ Done</button>
+            <button onClick={onTodaySkip} style={{ backgroundColor: "white", color: "#78716c", border: "1.5px solid #e7e5e4", borderRadius: "12px", padding: "13px 24px", fontSize: "15px", cursor: "pointer", fontFamily: "'Georgia', serif", letterSpacing: "0.3px" }}>Skip</button>
           </div>
         )}
       </div>
 
-      {/* Consistency progress bar — no label text, just the bar */}
-      <ProgressBar value={progressVal} max={progressMax} color={color} border={border} />
+      {/* Missed day prompt — one at a time, oldest first */}
+      {nextMissed && (
+        <MissedDayPrompt
+          dateKey={nextMissed} color={color} bg="white" border={border}
+          onAction={(action) => onMissedAction(nextMissed, action)}
+        />
+      )}
+
+      {/* Progress bar */}
+      <ProgressBar value={state.daysCount} max={Math.max(state.daysCount + state.skipCount, 1)} color={color} border={border} />
 
       {/* Undo toast */}
       {showUndo && <UndoToast message={undoMessage} onUndo={onUndo} color={color} />}
 
-      {/* Today status badge */}
-      {todayDone && (
+      {/* Today badge */}
+      {todayDone && !showUndo && (
         <div style={{ marginTop: "14px", textAlign: "center", fontSize: "12px", color, fontStyle: "italic", opacity: 0.8 }}>
           {state.lastAction === "done" ? "✓ Logged for today" : "— Skipped today"}
         </div>
@@ -353,300 +316,173 @@ function HabitCard({
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function Home() {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const todayKey = toInputValue(today); // "YYYY-MM-DD"
+  const todayD   = new Date(); todayD.setHours(0, 0, 0, 0);
+  const todayKey = toInputVal(todayD);
 
-  const [mounted, setMounted] = useState(false);
+  const NTCN_START = new Date(2026, 1, 1);
+  const MV_START   = new Date(2026, 0, 5);
 
-  // Qt ntcn & Qt mv — fixed start dates, auto-calculated
-  const NTCN_START = new Date(2026, 1, 1);  // 1-2-2026
-  const MV_START = new Date(2026, 0, 5);  // 5-1-2026
+  const [appState,  setAppState]  = useState<AppState>(DEFAULT_STATE);
+  const [loading,   setLoading]   = useState(true);
+  const [saving,    setSaving]    = useState(false);
+  const [saveError, setSaveError] = useState(false);
 
-  // Qt crn — editable start date + reset button
-  const [crnStart, setCrnStart] = useState<Date>(new Date(2026, 4, 1)); // 1-5-2026
-  const [crnEditMode, setCrnEditMode] = useState(false);
-
-  // St exrcs — habit tracker
-  // Default pre-loaded with your real data: 16 done, 3 skip, started 21-4-2026
-  // lastActionDate = today means Done/Skip won't show (already logged today)
-  const EXRCS_DEFAULT: HabitState = {
-    startDate: new Date(2026, 3, 21), // 21-4-2026
-    daysCount: 16,
-    skipCount: 3,
-    lastActionDate: todayKey, // exercise already done today — no prompt needed
-    lastAction: "done",
-  };
-
-  // St wlk — habit tracker
-  // 14 done, 3 skip, started 22-4-2026
-  // lastActionDate = null means Done/Skip WILL show today (still pending)
-  const WLK_DEFAULT: HabitState = {
-    startDate: new Date(2026, 3, 22), // 22-4-2026
-    daysCount: 14,
-    skipCount: 3,
-    lastActionDate: null, // walk still pending today — show Done/Skip
-    lastAction: null,
-  };
-
-  const [exrcs, setExrcs] = useState<HabitState>(EXRCS_DEFAULT);
+  // Undo state
   const [exrcsUndo, setExrcsUndo] = useState(false);
-  const [exrcsEdit, setExrcsEdit] = useState(false);
+  const [wlkUndo,   setWlkUndo]   = useState(false);
   const exrcsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wlkTimer   = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const [wlk, setWlk] = useState<HabitState>(WLK_DEFAULT);
-  const [wlkUndo, setWlkUndo] = useState(false);
-  const [wlkEdit, setWlkEdit] = useState(false);
-  const wlkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Crn edit mode
+  const [crnEdit, setCrnEdit] = useState(false);
 
-  // ── Load from localStorage (overrides defaults once data exists) ──
+  // ── Load from API (JSONBin) on mount ──
   useEffect(() => {
-    setMounted(true);
-
-    const storedCrn = localStorage.getItem("crn_start_date");
-    if (storedCrn) setCrnStart(new Date(storedCrn));
-
-    const storedExrcs = localStorage.getItem("exrcs_state");
-    if (storedExrcs) {
-      const p = JSON.parse(storedExrcs);
-      setExrcs({ ...p, startDate: new Date(p.startDate) });
-    } else {
-      // First launch — save defaults to localStorage
-      localStorage.setItem("exrcs_state", JSON.stringify({
-        ...EXRCS_DEFAULT,
-        startDate: EXRCS_DEFAULT.startDate.toISOString(),
-      }));
-    }
-
-    const storedWlk = localStorage.getItem("wlk_state");
-    if (storedWlk) {
-      const p = JSON.parse(storedWlk);
-      setWlk({ ...p, startDate: new Date(p.startDate) });
-    } else {
-      // First launch — save defaults to localStorage
-      localStorage.setItem("wlk_state", JSON.stringify({
-        ...WLK_DEFAULT,
-        startDate: WLK_DEFAULT.startDate.toISOString(),
-      }));
-    }
+    fetch("/api/state")
+      .then(r => r.json())
+      .then((data: AppState) => {
+        // Merge with defaults in case fields are missing (first-ever load)
+        setAppState({
+          crn:   { ...DEFAULT_STATE.crn,   ...data.crn },
+          exrcs: { ...DEFAULT_STATE.exrcs, ...data.exrcs },
+          wlk:   { ...DEFAULT_STATE.wlk,   ...data.wlk },
+        });
+      })
+      .catch(() => {
+        // API not configured yet — fall back to localStorage
+        const stored = localStorage.getItem("app_state");
+        setAppState(stored ? JSON.parse(stored) : DEFAULT_STATE);
+      })
+      .finally(() => setLoading(false));
   }, []);
 
-  if (!mounted) return null;
+  // ── Save helper — writes to API and localStorage as backup ──
+  const save = useCallback(async (next: AppState) => {
+    setAppState(next);
+    localStorage.setItem("app_state", JSON.stringify(next));
+    setSaving(true); setSaveError(false);
+    try {
+      const r = await fetch("/api/state", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(next) });
+      if (!r.ok) setSaveError(true);
+    } catch { setSaveError(true); }
+    finally { setSaving(false); }
+  }, []);
 
-  // ── Derived values ──
-  const crnDays = getDaysDiff(crnStart, today);
-  const ntcnDays = getDaysDiff(NTCN_START, today);
-  const mvDays = getDaysDiff(MV_START, today);
-
-  // Today's action status — compare stored date to today's key
-  const exrcsTodayDone = exrcs.lastActionDate === todayKey;
-  const wlkTodayDone = wlk.lastActionDate === todayKey;
-
-  // ── Qt crn handlers ──
-  const handleCrnDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = e.target.value;
-    if (!val) return;
-    const d = new Date(val + "T00:00:00");
-    setCrnStart(d);
-    localStorage.setItem("crn_start_date", d.toISOString());
-    setCrnEditMode(false);
-  };
-
-  const handleCrnReset = () => {
-    const tomorrow = new Date(today);
-    tomorrow.setDate(today.getDate() + 1);
-    tomorrow.setHours(0, 0, 0, 0);
-    setCrnStart(tomorrow);
-    localStorage.setItem("crn_start_date", tomorrow.toISOString());
-  };
-
-  // ── Habit helpers ──
-  function save(key: string, state: HabitState) {
-    localStorage.setItem(key, JSON.stringify({
-      ...state,
-      startDate: state.startDate.toISOString(),
-    }));
+  if (loading || !appState) {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", backgroundColor: "#fafaf9", fontFamily: "'Georgia', serif" }}>
+        <p style={{ color: "#a8a29e", fontStyle: "italic" }}>Loading…</p>
+      </div>
+    );
   }
 
+  // ── Derived ──
+  const crnStartD  = parseLocalDate(appState.crn.startDate);
+  const crnDays    = getDaysDiff(crnStartD, todayD);
+  const ntcnDays   = getDaysDiff(NTCN_START, todayD);
+  const mvDays     = getDaysDiff(MV_START, todayD);
+
+  const exrcsMissed = getMissingDays(appState.exrcs, todayKey);
+  const wlkMissed   = getMissingDays(appState.wlk,   todayKey);
+
+  const tomorrow = addDays(todayD, 1);
+
+  // ── Habit action ──
   function recordAction(
-    key: string,
-    state: HabitState,
-    setState: React.Dispatch<React.SetStateAction<HabitState>>,
+    key: "exrcs" | "wlk",
+    dateKey: string,
+    action: "done" | "skip",
     setUndo: React.Dispatch<React.SetStateAction<boolean>>,
     timer: React.MutableRefObject<ReturnType<typeof setTimeout> | null>,
-    action: "done" | "skip"
+    isToday: boolean
   ) {
+    const habit = appState[key];
     const next: HabitState = {
-      ...state,
-      daysCount: action === "done" ? state.daysCount + 1 : state.daysCount,
-      skipCount: action === "skip" ? state.skipCount + 1 : state.skipCount,
-      lastActionDate: todayKey,
-      lastAction: action,
+      ...habit,
+      daysCount:      action === "done" ? habit.daysCount + 1 : habit.daysCount,
+      skipCount:      action === "skip" ? habit.skipCount + 1 : habit.skipCount,
+      lastActionDate: isToday ? dateKey : habit.lastActionDate,
+      lastAction:     isToday ? action  : habit.lastAction,
+      loggedDates:    [...habit.loggedDates.filter(d => d !== dateKey), dateKey],
     };
-    setState(next);
-    save(key, next);
-    setUndo(true);
-    if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(() => setUndo(false), 10000);
+    const nextApp = { ...appState, [key]: next };
+    save(nextApp);
+    if (isToday) {
+      setUndo(true);
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = setTimeout(() => setUndo(false), 10000);
+    }
   }
 
-  function undoAction(
-    key: string,
-    state: HabitState,
-    setState: React.Dispatch<React.SetStateAction<HabitState>>,
+  function undoTodayAction(
+    key: "exrcs" | "wlk",
     setUndo: React.Dispatch<React.SetStateAction<boolean>>,
     timer: React.MutableRefObject<ReturnType<typeof setTimeout> | null>
   ) {
+    const habit = appState[key];
     const next: HabitState = {
-      ...state,
-      daysCount: state.lastAction === "done" ? state.daysCount - 1 : state.daysCount,
-      skipCount: state.lastAction === "skip" ? state.skipCount - 1 : state.skipCount,
+      ...habit,
+      daysCount:      habit.lastAction === "done" ? habit.daysCount - 1 : habit.daysCount,
+      skipCount:      habit.lastAction === "skip" ? habit.skipCount - 1 : habit.skipCount,
       lastActionDate: null,
-      lastAction: null,
+      lastAction:     null,
+      loggedDates:    habit.loggedDates.filter(d => d !== todayKey),
     };
-    setState(next);
-    save(key, next);
+    save({ ...appState, [key]: next });
     setUndo(false);
     if (timer.current) clearTimeout(timer.current);
   }
 
-  function updateHabitStart(
-    key: string,
-    state: HabitState,
-    setState: React.Dispatch<React.SetStateAction<HabitState>>,
-    setEdit: React.Dispatch<React.SetStateAction<boolean>>,
-    val: string
-  ) {
-    if (!val) return;
-    const d = new Date(val + "T00:00:00");
-    const next = { ...state, startDate: d };
-    setState(next);
-    save(key, next);
-    setEdit(false);
+  function updateHabitCount(key: "exrcs" | "wlk", field: "daysCount" | "skipCount", val: number) {
+    save({ ...appState, [key]: { ...appState[key], [field]: val } });
   }
 
-  const tomorrow = new Date(today);
-  tomorrow.setDate(today.getDate() + 1);
+  function updateHabitStart(key: "exrcs" | "wlk", val: string) {
+    save({ ...appState, [key]: { ...appState[key], startDate: val } });
+  }
 
   // ─── RENDER ───────────────────────────────────────────────────────────────
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        backgroundColor: "#fafaf9",
-        fontFamily: "'Georgia', 'Times New Roman', serif",
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        paddingBottom: "56px",
-      }}
-    >
+    <div style={{ minHeight: "100vh", backgroundColor: "#fafaf9", fontFamily: "'Georgia', 'Times New Roman', serif", display: "flex", flexDirection: "column", alignItems: "center", paddingBottom: "56px" }}>
+
       {/* Header */}
-      <div
-        style={{
-          width: "100%",
-          backgroundColor: "#1c1917",
-          padding: "28px 24px 24px",
-          textAlign: "center",
-          marginBottom: "28px",
-        }}
-      >
-        <p style={{ color: "#a8a29e", fontSize: "11px", letterSpacing: "3px", textTransform: "uppercase", margin: "0 0 8px 0" }}>
-          your streak tracker
-        </p>
-        <h1 style={{ color: "#fafaf9", fontSize: "clamp(22px, 6vw, 30px)", fontWeight: "normal", letterSpacing: "0.5px", margin: 0 }}>
-          Stay updated - Not outdated
-        </h1>
-        <p style={{ color: "#78716c", fontSize: "13px", marginTop: "10px", fontStyle: "italic" }}>
-          {formatDate(today)}
+      <div style={{ width: "100%", backgroundColor: "#1c1917", padding: "28px 24px 24px", textAlign: "center", marginBottom: "28px" }}>
+        <p style={{ color: "#a8a29e", fontSize: "11px", letterSpacing: "3px", textTransform: "uppercase", margin: "0 0 8px 0" }}>your streak tracker</p>
+        <h1 style={{ color: "#fafaf9", fontSize: "clamp(22px, 6vw, 30px)", fontWeight: "normal", letterSpacing: "0.5px", margin: 0 }}>Stay the Course</h1>
+        <p style={{ color: "#78716c", fontSize: "13px", marginTop: "10px", fontStyle: "italic" }}>{formatDate(todayD)}</p>
+        {/* Save status indicator */}
+        <p style={{ color: saving ? "#a8a29e" : saveError ? "#ef4444" : "transparent", fontSize: "10px", marginTop: "6px", letterSpacing: "1px" }}>
+          {saving ? "saving…" : saveError ? "⚠ save failed — check connection" : "·"}
         </p>
       </div>
 
       {/* Cards */}
-      <div
-        style={{
-          width: "100%",
-          maxWidth: "420px",
-          padding: "0 16px",
-          display: "flex",
-          flexDirection: "column",
-          gap: "16px",
-        }}
-      >
-        {/* Qt ntcn */}
-        <QtFixedCard
-          label="Qt ntcn"
-          startDate={NTCN_START}
-          days={ntcnDays}
-          color="#16a34a" bg="#f0fdf4" border="#bbf7d0"
-        />
+      <div style={{ width: "100%", maxWidth: "420px", padding: "0 16px", display: "flex", flexDirection: "column", gap: "16px" }}>
 
-        {/* Qt mv */}
-        <QtFixedCard
-          label="Qt mv"
-          startDate={MV_START}
-          days={mvDays}
-          color="#2563eb" bg="#eff6ff" border="#bfdbfe"
-        />
+        <QtFixedCard label="Qt ntcn" startDate={NTCN_START} days={ntcnDays} color="#16a34a" bg="#f0fdf4" border="#bbf7d0" />
+        <QtFixedCard label="Qt mv"   startDate={MV_START}   days={mvDays}   color="#2563eb" bg="#eff6ff" border="#bfdbfe" />
 
         {/* Qt crn */}
-        <div
-          style={{
-            backgroundColor: "#faf5ff",
-            border: "1.5px solid #e9d5ff",
-            borderRadius: "16px",
-            padding: "24px 22px",
-            boxShadow: "0 2px 8px rgba(0,0,0,0.04)",
-          }}
-        >
-          <p style={{ fontSize: "11px", letterSpacing: "2.5px", textTransform: "uppercase", color: "#9333ea", margin: "0 0 6px 0", fontWeight: "bold" }}>
-            Qt crn
-          </p>
+        <div style={{ backgroundColor: "#faf5ff", border: "1.5px solid #e9d5ff", borderRadius: "16px", padding: "24px 22px", boxShadow: "0 2px 8px rgba(0,0,0,0.04)" }}>
+          <p style={{ fontSize: "11px", letterSpacing: "2.5px", textTransform: "uppercase", color: "#9333ea", margin: "0 0 6px 0", fontWeight: "bold" }}>Qt crn</p>
 
-          {crnEditMode ? (
+          {crnEdit ? (
             <div style={{ marginBottom: "16px" }}>
               <input
-                type="date"
-                defaultValue={toInputValue(crnStart)}
-                max={todayInputValue()}
-                autoFocus
-                onChange={handleCrnDateChange}
-                onBlur={() => setCrnEditMode(false)}
-                style={{
-                  fontSize: "13px",
-                  color: "#9333ea",
-                  border: "1.5px solid #e9d5ff",
-                  borderRadius: "8px",
-                  padding: "6px 10px",
-                  fontFamily: "'Georgia', serif",
-                  backgroundColor: "white",
-                  outline: "none",
-                  width: "100%",
-                  boxSizing: "border-box" as const,
-                }}
+                type="date" defaultValue={appState.crn.startDate} max={todayStr()} autoFocus
+                onChange={e => { if (e.target.value) { save({ ...appState, crn: { startDate: e.target.value } }); setCrnEdit(false); } }}
+                onBlur={() => setCrnEdit(false)}
+                style={{ fontSize: "13px", color: "#9333ea", border: "1.5px solid #e9d5ff", borderRadius: "8px", padding: "6px 10px", fontFamily: "'Georgia', serif", backgroundColor: "white", outline: "none", width: "100%", boxSizing: "border-box" as const }}
               />
             </div>
           ) : (
-            <p
-              onClick={() => setCrnEditMode(true)}
-              style={{
-                fontSize: "13px",
-                color: "#9333ea",
-                margin: "0 0 16px 0",
-                fontStyle: "italic",
-                cursor: "pointer",
-                textDecoration: "underline dotted",
-                display: "inline-block",
-              }}
-            >
-              since {formatDate(crnStart)} ✎
+            <p onClick={() => setCrnEdit(true)} style={{ fontSize: "13px", color: "#9333ea", margin: "0 0 16px 0", fontStyle: "italic", cursor: "pointer", textDecoration: "underline dotted", display: "inline-block" }}>
+              since {formatDate(crnStartD)} ✎
             </p>
           )}
 
           <div style={{ display: "flex", alignItems: "flex-end", gap: "8px" }}>
-            <span style={{ fontSize: "clamp(52px, 16vw, 72px)", fontWeight: "bold", color: "#9333ea", lineHeight: 1, letterSpacing: "-2px" }}>
-              {crnDays}
-            </span>
+            <span style={{ fontSize: "clamp(52px, 16vw, 72px)", fontWeight: "bold", color: "#9333ea", lineHeight: 1, letterSpacing: "-2px" }}>{crnDays}</span>
             <span style={{ fontSize: "16px", color: "#a8a29e", paddingBottom: "10px", fontStyle: "italic" }}>days</span>
           </div>
 
@@ -654,26 +490,10 @@ export default function Home() {
 
           <div style={{ marginTop: "20px" }}>
             <button
-              onClick={handleCrnReset}
-              style={{
-                backgroundColor: "white",
-                border: "1.5px solid #e9d5ff",
-                borderRadius: "10px",
-                padding: "10px 20px",
-                fontSize: "13px",
-                color: "#9333ea",
-                cursor: "pointer",
-                fontFamily: "'Georgia', serif",
-                width: "100%",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: "6px",
-                boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
-              }}
+              onClick={() => { const t = addDays(todayD, 1); save({ ...appState, crn: { startDate: toInputVal(t) } }); }}
+              style={{ backgroundColor: "white", border: "1.5px solid #e9d5ff", borderRadius: "10px", padding: "10px 20px", fontSize: "13px", color: "#9333ea", cursor: "pointer", fontFamily: "'Georgia', serif", width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", boxShadow: "0 1px 3px rgba(0,0,0,0.06)" }}
             >
-              <span style={{ fontSize: "15px" }}>↺</span>
-              Reset — start fresh tomorrow
+              <span style={{ fontSize: "15px" }}>↺</span> Reset — start fresh tomorrow
             </button>
             <p style={{ textAlign: "center", fontSize: "11px", color: "#a8a29e", marginTop: "8px", fontStyle: "italic" }}>
               resets to 0 · new start date: {formatDate(tomorrow)}
@@ -690,34 +510,30 @@ export default function Home() {
 
         {/* St exrcs */}
         <HabitCard
-          label="St exrcs"
-          color="#ea580c" bg="#fff7ed" border="#fed7aa"
-          state={exrcs}
-          todayDone={exrcsTodayDone}
-          showUndo={exrcsUndo}
-          editMode={exrcsEdit}
-          setEditMode={setExrcsEdit}
-          onDone={() => recordAction("exrcs_state", exrcs, setExrcs, setExrcsUndo, exrcsTimer, "done")}
-          onSkip={() => recordAction("exrcs_state", exrcs, setExrcs, setExrcsUndo, exrcsTimer, "skip")}
-          onUndo={() => undoAction("exrcs_state", exrcs, setExrcs, setExrcsUndo, exrcsTimer)}
-          onDateChange={(val) => updateHabitStart("exrcs_state", exrcs, setExrcs, setExrcsEdit, val)}
-          undoMessage={exrcs.lastAction === "skip" ? "Marked as skipped — was it actually done?" : "Marked as done — change your mind?"}
+          label="St exrcs" color="#ea580c" bg="#fff7ed" border="#fed7aa"
+          state={appState.exrcs} todayKey={todayKey}
+          showUndo={exrcsUndo} undoMessage={appState.exrcs.lastAction === "skip" ? "Marked as skipped — was it done?" : "Marked as done — change your mind?"}
+          missedDays={exrcsMissed}
+          onTodayDone={() => recordAction("exrcs", todayKey, "done", setExrcsUndo, exrcsTimer, true)}
+          onTodaySkip={() => recordAction("exrcs", todayKey, "skip", setExrcsUndo, exrcsTimer, true)}
+          onUndo={() => undoTodayAction("exrcs", setExrcsUndo, exrcsTimer)}
+          onMissedAction={(dateKey, action) => recordAction("exrcs", dateKey, action, setExrcsUndo, exrcsTimer, false)}
+          onDateChange={val => updateHabitStart("exrcs", val)}
+          onCountChange={(field, val) => updateHabitCount("exrcs", field, val)}
         />
 
         {/* St wlk */}
         <HabitCard
-          label="St wlk"
-          color="#0891b2" bg="#ecfeff" border="#a5f3fc"
-          state={wlk}
-          todayDone={wlkTodayDone}
-          showUndo={wlkUndo}
-          editMode={wlkEdit}
-          setEditMode={setWlkEdit}
-          onDone={() => recordAction("wlk_state", wlk, setWlk, setWlkUndo, wlkTimer, "done")}
-          onSkip={() => recordAction("wlk_state", wlk, setWlk, setWlkUndo, wlkTimer, "skip")}
-          onUndo={() => undoAction("wlk_state", wlk, setWlk, setWlkUndo, wlkTimer)}
-          onDateChange={(val) => updateHabitStart("wlk_state", wlk, setWlk, setWlkEdit, val)}
-          undoMessage={wlk.lastAction === "skip" ? "Marked as skipped — was it actually done?" : "Marked as done — change your mind?"}
+          label="St wlk" color="#0891b2" bg="#ecfeff" border="#a5f3fc"
+          state={appState.wlk} todayKey={todayKey}
+          showUndo={wlkUndo} undoMessage={appState.wlk.lastAction === "skip" ? "Marked as skipped — was it done?" : "Marked as done — change your mind?"}
+          missedDays={wlkMissed}
+          onTodayDone={() => recordAction("wlk", todayKey, "done", setWlkUndo, wlkTimer, true)}
+          onTodaySkip={() => recordAction("wlk", todayKey, "skip", setWlkUndo, wlkTimer, true)}
+          onUndo={() => undoTodayAction("wlk", setWlkUndo, wlkTimer)}
+          onMissedAction={(dateKey, action) => recordAction("wlk", dateKey, action, setWlkUndo, wlkTimer, false)}
+          onDateChange={val => updateHabitStart("wlk", val)}
+          onCountChange={(field, val) => updateHabitCount("wlk", field, val)}
         />
 
         <p style={{ textAlign: "center", fontSize: "12px", color: "#c4b8b0", marginTop: "8px", fontStyle: "italic" }}>
